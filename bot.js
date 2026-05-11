@@ -1,112 +1,209 @@
 const mineflayer = require('mineflayer')
-const config = require('./config')
+const http       = require('http')
+const WebSocket  = require('ws')
+const config     = require('./config')
 
 // ── State ─────────────────────────────────────────────────────────────────────
-let bot = null
-let antiAfkTimer = null
+let bot            = null
+let antiAfkTimer   = null
 let reconnectTimer = null
 let reconnectAttempts = 0
+let loggedIn       = false
 
-// ── Logging helpers ───────────────────────────────────────────────────────────
-function log(msg)  { console.log (`[${timestamp()}] [INFO]  ${msg}`) }
-function warn(msg) { console.warn (`[${timestamp()}] [WARN]  ${msg}`) }
-function err(msg)  { console.error(`[${timestamp()}] [ERROR] ${msg}`) }
+// ── Logging ───────────────────────────────────────────────────────────────────
 function timestamp() {
   return new Date().toISOString().replace('T', ' ').substring(0, 19)
 }
+function log(msg)  { console.log (`[${timestamp()}] [INFO]  ${msg}`); broadcast('log', msg) }
+function warn(msg) { console.warn(`[${timestamp()}] [WARN]  ${msg}`); broadcast('log', '⚠ ' + msg) }
+function err(msg)  { console.error(`[${timestamp()}] [ERROR] ${msg}`); broadcast('log', '✖ ' + msg) }
+
+// ── WebSocket server ──────────────────────────────────────────────────────────
+const wss = new WebSocket.Server({ noServer: true })
+
+function broadcast(type, data) {
+  const msg = JSON.stringify({ type, data })
+  wss.clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(msg) })
+}
+
+wss.on('connection', ws => {
+  ws.on('message', raw => {
+    try {
+      const { type, data } = JSON.parse(raw)
+      if (type === 'chat' && bot) {
+        bot.chat(data)
+        log(`[You → bot] ${data}`)
+      }
+    } catch (_) {}
+  })
+})
+
+// ── Web console HTML ──────────────────────────────────────────────────────────
+const PAGE = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Bot Console</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{background:#1a1a2e;color:#e0e0e0;font-family:'Courier New',monospace;
+         display:flex;flex-direction:column;height:100vh;padding:16px;gap:12px}
+    h2{color:#7ec8e3;font-size:1rem;letter-spacing:2px;text-transform:uppercase}
+    #status{font-size:.8rem;color:#888}
+    #status.on{color:#4caf50}
+    #log{flex:1;overflow-y:auto;background:#0d0d1a;border:1px solid #333;
+         border-radius:6px;padding:10px;font-size:.82rem;line-height:1.7}
+    .e{padding:1px 0;word-break:break-word;border-bottom:1px solid #111}
+    .w{color:#ffb347}.x{color:#ff6b6b}.c{color:#90ee90}.y{color:#7ec8e3}
+    #row{display:flex;gap:8px}
+    input{flex:1;padding:10px;background:#0d0d1a;border:1px solid #444;
+          border-radius:6px;color:#fff;font-family:inherit;font-size:.9rem;outline:none}
+    input:focus{border-color:#7ec8e3}
+    button{padding:10px 18px;background:#7ec8e3;color:#0d0d1a;border:none;
+           border-radius:6px;font-weight:bold;cursor:pointer;font-family:inherit}
+    button:hover{background:#5bb8d4}
+  </style>
+</head>
+<body>
+  <h2>🤖 Bot Console &nbsp;<span id="status">connecting...</span></h2>
+  <div id="log"></div>
+  <div id="row">
+    <input id="inp" placeholder="Type captcha answer or chat message, press Enter..." autocomplete="off">
+    <button onclick="send()">Send</button>
+  </div>
+<script>
+  const logEl=document.getElementById('log')
+  const st=document.getElementById('status')
+  const inp=document.getElementById('inp')
+  const proto=location.protocol==='https:'?'wss':'ws'
+  const ws=new WebSocket(proto+'://'+location.host)
+  ws.onopen=()=>{st.textContent='connected';st.className='on';add('Connected to bot console.','')}
+  ws.onclose=()=>{st.textContent='disconnected';st.className=''}
+  ws.onmessage=e=>{
+    const{type,data}=JSON.parse(e.data)
+    if(type==='log') add(data, data.startsWith('⚠')?'w':data.startsWith('✖')?'x':'')
+    if(type==='chat') add(data,'c')
+  }
+  function add(text,cls){
+    const d=document.createElement('div')
+    d.className='e '+cls
+    d.textContent='['+new Date().toLocaleTimeString()+'] '+text
+    logEl.appendChild(d)
+    logEl.scrollTop=logEl.scrollHeight
+  }
+  function send(){
+    const v=inp.value.trim();if(!v)return
+    ws.send(JSON.stringify({type:'chat',data:v}))
+    add('[You] '+v,'y')
+    inp.value=''
+  }
+  inp.addEventListener('keydown',e=>{if(e.key==='Enter')send()})
+</script>
+</body></html>`
+
+// ── HTTP server ───────────────────────────────────────────────────────────────
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/html' })
+  res.end(PAGE)
+})
+
+server.on('upgrade', (req, socket, head) => {
+  wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req))
+})
+
+server.listen(process.env.PORT || 3000, () => {
+  console.log(`[${timestamp()}] [INFO]  Web console ready on port ${process.env.PORT || 3000}`)
+})
 
 // ── Bot creation ──────────────────────────────────────────────────────────────
 function createBot() {
   clearTimers()
+  loggedIn = false
 
   log(`Connecting to ${config.host}:${config.port} as ${config.username} (attempt ${++reconnectAttempts})`)
 
   bot = mineflayer.createBot({
-    host:     config.host,
-    port:     config.port,
-    username: config.username,
-    auth:     config.auth,
-    version:  config.version,
+    host:       config.host,
+    port:       config.port,
+    username:   config.username,
+    auth:       config.auth,
+    version:    config.version,
     hideErrors: false,
   })
-
-  // ── Events ──────────────────────────────────────────────────────────────────
 
   bot.once('login', () => {
     reconnectAttempts = 0
     log(`Logged in as ${bot.username}`)
-
-    // Some Minefort setups drop you into a lobby first
-    if (config.joinCommand) {
-      log(`Sending join command: ${config.joinCommand}`)
-      setTimeout(() => bot.chat(config.joinCommand), 2000)
-    }
-
+    log('Waiting for captcha — watch chat below and type the answer in the box...')
     startAntiAfk()
   })
 
-  bot.on('spawn', () => {
-    log(`Spawned in world: ${bot.game.dimension}`)
-  })
+  bot.on('spawn', () => log(`Spawned in world: ${bot.game.dimension}`))
 
-  bot.on('chat', (username, message) => {
-    // Ignore own messages
-    if (username === bot.username) return
-    log(`<${username}> ${message}`)
+  // Relay every server message to the web console
+  bot.on('message', (jsonMsg) => {
+    const text = jsonMsg.toString()
+    if (!text.trim()) return
+    broadcast('chat', text)
+    console.log(`[${timestamp()}] [CHAT] ${text}`)
+
+    const lower = text.toLowerCase()
+
+    // Auto-send /login when AuthMe prompts
+    if (!loggedIn && (lower.includes('/login') || lower.includes('please login') || lower.includes('log in'))) {
+      setTimeout(() => {
+        bot.chat('/login ' + config.botPassword)
+        log('Auto-sent /login')
+        loggedIn = true
+      }, 800)
+    }
+
+    // Auto-transfer after successful login
+    if (loggedIn && (lower.includes('successfully logged in') || lower.includes('you are now logged'))) {
+      setTimeout(() => {
+        bot.chat('/server lunarsmps5')
+        log('Auto-sent /server transfer')
+      }, 1200)
+    }
   })
 
   bot.on('kicked', (reason) => {
-    let reasonText = reason
-    try {
-      // reason is sometimes a JSON chat component
-      const parsed = JSON.parse(reason)
-      reasonText = parsed.text || parsed.translate || reason
-    } catch (_) {}
-    warn(`Kicked: ${reasonText}`)
+    let r = reason
+    try { const p = JSON.parse(reason); r = p.text || p.translate || reason } catch (_) {}
+    warn(`Kicked: ${r}`)
     scheduleReconnect()
   })
 
   bot.on('error', (e) => {
-    // ECONNREFUSED usually means the server is still starting up
-    if (e.code === 'ECONNREFUSED') {
-      warn(`Connection refused — server may be starting. Retrying...`)
-    } else {
-      err(`${e.message}`)
-    }
+    if (e.code === 'ECONNREFUSED') warn('Connection refused — retrying...')
+    else err(e.message)
   })
 
   bot.on('end', (reason) => {
-    log(`Disconnected (${reason || 'unknown reason'})`)
+    log(`Disconnected (${reason || 'unknown'})`)
     clearTimers()
     scheduleReconnect()
   })
 }
 
-// ── Anti-AFK ─────────────────────────────────────────────────────────────────
+// ── Anti-AFK ──────────────────────────────────────────────────────────────────
 function startAntiAfk() {
   clearInterval(antiAfkTimer)
   antiAfkTimer = setInterval(() => {
     if (!bot || !bot.entity) return
-
-    // Randomly look around and do a small hop to reset the AFK timer
-    const yaw   = Math.random() * Math.PI * 2
-    const pitch = (Math.random() - 0.5) * Math.PI * 0.5
-    bot.look(yaw, pitch, false)
-
-    // Tap jump briefly
+    bot.look(Math.random() * Math.PI * 2, (Math.random() - 0.5) * Math.PI * 0.5, false)
     bot.setControlState('jump', true)
     setTimeout(() => bot.setControlState('jump', false), 250)
-
     log('Anti-AFK: nudged')
   }, config.antiAfkInterval)
 }
 
-// ── Reconnect logic ───────────────────────────────────────────────────────────
+// ── Reconnect ─────────────────────────────────────────────────────────────────
 function scheduleReconnect() {
   clearTimers()
-  const delay = config.reconnectDelay
-  log(`Reconnecting in ${delay / 1000}s...`)
-  reconnectTimer = setTimeout(createBot, delay)
+  log(`Reconnecting in ${config.reconnectDelay / 1000}s...`)
+  reconnectTimer = setTimeout(createBot, config.reconnectDelay)
 }
 
 function clearTimers() {
@@ -114,7 +211,7 @@ function clearTimers() {
   if (reconnectTimer) { clearTimeout(reconnectTimer);  reconnectTimer = null }
 }
 
-// ── Graceful shutdown ─────────────────────────────────────────────────────────
+// ── Shutdown ──────────────────────────────────────────────────────────────────
 process.on('SIGINT', () => {
   log('Shutting down...')
   clearTimers()
@@ -127,9 +224,4 @@ process.on('uncaughtException', (e) => {
   scheduleReconnect()
 })
 
-// Keeps Render's free tier alive — must be before createBot()
-const http = require('http')
-http.createServer((req, res) => res.end('ok')).listen(process.env.PORT || 3000)
-
-// ── Start ─────────────────────────────────────────────────────────────────────
 createBot()
