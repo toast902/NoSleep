@@ -51,8 +51,9 @@ let antiAfkTimer   = null
 let reconnectTimer = null
 let reconnectAttempts = 0
 let loggedIn       = false
-const mapGrids     = new Map() // mapId -> Uint8Array(128*128)
-const mapSlotOrder = []        // ordered list of mapIds as they first appear
+let transferTarget = null   // { host, port } if a Transfer packet was received
+const mapGrids     = new Map()
+const mapSlotOrder = []
 
 // ── Logging ───────────────────────────────────────────────────────────────────
 function timestamp() {
@@ -71,16 +72,13 @@ function broadcast(type, data) {
 }
 
 wss.on('connection', ws => {
-  // When a new browser connects, send all maps we already have
   mapSlotOrder.forEach((id, slot) => {
     const grid = mapGrids.get(id)
     if (grid) {
-      try {
-        ws.send(JSON.stringify({ type: 'map', data: { slot, b64: gridToPNGBase64(grid) } }))
-      } catch (_) {}
+      try { ws.send(JSON.stringify({ type: 'map', data: { slot, b64: gridToPNGBase64(grid) } })) }
+      catch (_) {}
     }
   })
-
   ws.on('message', raw => {
     try {
       const { type, data } = JSON.parse(raw)
@@ -112,22 +110,9 @@ const PAGE = `<!DOCTYPE html>
     .w{color:#ffb347}.x{color:#ff6b6b}.c{color:#90ee90}.y{color:#7ec8e3}
     #mapPanel{display:flex;flex-direction:column;align-items:center;gap:8px;width:310px;flex-shrink:0}
     #mapLabel{color:#7ec8e3;font-size:.8rem;text-transform:uppercase;letter-spacing:1px;align-self:flex-start}
-    #mapGrid{
-      display:grid;
-      grid-template-columns:repeat(3,96px);
-      grid-template-rows:repeat(3,96px);
-      gap:2px;
-      background:#0d0d1a;
-      border:2px solid #333;
-      border-radius:6px;
-      padding:6px;
-    }
-    .mapCell{
-      width:96px;height:96px;
-      image-rendering:pixelated;
-      background:#111;
-      border:1px solid #222;
-    }
+    #mapGrid{display:grid;grid-template-columns:repeat(3,96px);grid-template-rows:repeat(3,96px);
+             gap:2px;background:#0d0d1a;border:2px solid #333;border-radius:6px;padding:6px}
+    .mapCell{width:96px;height:96px;image-rendering:pixelated;background:#111;border:1px solid #222}
     #mapHint{font-size:.72rem;color:#555;text-align:center}
     #row{display:flex;gap:8px}
     input{flex:1;padding:10px;background:#0d0d1a;border:1px solid #444;
@@ -158,10 +143,8 @@ const PAGE = `<!DOCTYPE html>
   const logEl=document.getElementById('log')
   const st=document.getElementById('status')
   const inp=document.getElementById('inp')
-
   const proto=location.protocol==='https:'?'wss':'ws'
   const ws=new WebSocket(proto+'://'+location.host)
-
   ws.onopen=()=>{st.textContent='connected';st.className='on';add('Connected.','')}
   ws.onclose=()=>{st.textContent='disconnected';st.className=''}
   ws.onmessage=e=>{
@@ -173,7 +156,6 @@ const PAGE = `<!DOCTYPE html>
       if(cell){ cell.src='data:image/png;base64,'+data.b64 }
     }
   }
-
   function add(text,cls){
     const d=document.createElement('div')
     d.className='e '+cls
@@ -181,14 +163,12 @@ const PAGE = `<!DOCTYPE html>
     logEl.appendChild(d)
     logEl.scrollTop=logEl.scrollHeight
   }
-
   function send(){
     const v=inp.value.trim();if(!v)return
     ws.send(JSON.stringify({type:'chat',data:v}))
     add('[You] '+v,'y')
     inp.value=''
   }
-
   inp.addEventListener('keydown',e=>{if(e.key==='Enter')send()})
 </script>
 </body>
@@ -207,16 +187,20 @@ server.listen(process.env.PORT || 3000, () => {
 })
 
 // ── Bot creation ──────────────────────────────────────────────────────────────
-function createBot() {
+function createBot(host, port) {
   clearTimers()
   loggedIn = false
   mapGrids.clear()
   mapSlotOrder.length = 0
 
-  log(`Connecting to ${config.host}:${config.port} as ${config.username} (attempt ${++reconnectAttempts})`)
+  const connectHost = host || config.host
+  const connectPort = port || config.port
+  const isLobby     = !host  // true when connecting to Minefort lobby
+
+  log(`Connecting to ${connectHost}:${connectPort} as ${config.username} (attempt ${++reconnectAttempts})`)
 
   bot = mineflayer.createBot({
-    host: config.host, port: config.port,
+    host: connectHost, port: connectPort,
     username: config.username, auth: config.auth,
     version: config.version, hideErrors: false,
   })
@@ -224,20 +208,37 @@ function createBot() {
   bot.once('login', () => {
     reconnectAttempts = 0
     log(`Logged in as ${bot.username}`)
-    log('Waiting for captcha map panels to load...')
+
+    if (isLobby) {
+      log('In Minefort lobby — waiting for captcha...')
+    } else {
+      log('Connected directly to game server!')
+      // On the actual server we only need AuthMe login, no captcha
+      setTimeout(() => {
+        bot.chat('/login ' + config.botPassword)
+        log('Auto-sent /login to game server')
+      }, 2000)
+    }
+
     startAntiAfk()
 
-    bot._client.on('map', (packet) => {
-      // Field name varies by protocol version — try all known names
-      const id = packet.mapId ?? packet.id ?? packet.itemDamage
-      if (id === undefined || id === null) {
-        warn(`Unknown map packet fields: ${Object.keys(packet).join(', ')}`)
-        return
-      }
+    // ── Handle native Transfer packet (Minecraft 1.20.5+) ──────────────────
+    // Minefort uses this to redirect the player from the lobby to the actual
+    // game server. Mineflayer doesn't handle it so we catch it manually.
+    bot._client.on('transfer', (packet) => {
+      log(`Transfer packet → ${packet.host}:${packet.port}`)
+      transferTarget = { host: packet.host, port: packet.port }
+      clearTimers()
+      bot._client.end('transfer')
+    })
 
-      // Assign a slot index to this map ID the first time we see it
+    // ── Map data ────────────────────────────────────────────────────────────
+    bot._client.on('map', (packet) => {
+      const id = packet.mapId ?? packet.id ?? packet.itemDamage
+      if (id === undefined || id === null) return
+
       if (!mapGrids.has(id)) {
-        if (mapSlotOrder.length >= 9) return // ignore beyond 3x3
+        if (mapSlotOrder.length >= 9) return
         mapGrids.set(id, new Uint8Array(128 * 128))
         mapSlotOrder.push(id)
         log(`Map panel ${mapSlotOrder.length}/9 discovered (id ${id})`)
@@ -246,7 +247,6 @@ function createBot() {
       const grid = mapGrids.get(id)
       const slot = mapSlotOrder.indexOf(id)
 
-      // Merge incoming chunk into the full 128x128 grid
       if (packet.data && packet.columns > 0) {
         for (let dy = 0; dy < packet.rows; dy++) {
           for (let dx = 0; dx < packet.columns; dx++) {
@@ -254,12 +254,8 @@ function createBot() {
               packet.data[dy * packet.columns + dx]
           }
         }
-
-        try {
-          broadcast('map', { slot, b64: gridToPNGBase64(grid) })
-        } catch (e) {
-          warn(`Map render error: ${e.message}`)
-        }
+        try { broadcast('map', { slot, b64: gridToPNGBase64(grid) }) }
+        catch (e) { warn(`Map render error: ${e.message}`) }
       }
     })
   })
@@ -273,6 +269,8 @@ function createBot() {
     console.log(`[${timestamp()}] [CHAT] ${text}`)
 
     const lower = text.toLowerCase()
+
+    // AuthMe login prompt
     if (!loggedIn && (lower.includes('/login') || lower.includes('please login') || lower.includes('log in'))) {
       setTimeout(() => {
         bot.chat('/login ' + config.botPassword)
@@ -280,13 +278,16 @@ function createBot() {
         loggedIn = true
       }, 800)
     }
-    if (loggedIn && (lower.includes('successfully logged in') || lower.includes('you are now logged'))) {
+
+    // After AuthMe success in the lobby, Minefort auto-transfers via Transfer packet.
+    // The /server command is only a fallback if that doesn't happen within 3s.
+    if (loggedIn && isLobby && (lower.includes('successfully logged in') || lower.includes('you are now logged'))) {
       setTimeout(() => {
-        if (bot && bot.entity) {
+        if (bot && bot.entity && !transferTarget) {
+          log('No transfer packet yet — trying /server as fallback')
           bot.chat('/server lunarsmps5')
-          log('Auto-sent /server transfer')
         }
-      }, 1200)
+      }, 3000)
     }
   })
 
@@ -294,7 +295,6 @@ function createBot() {
     let r
     try {
       const obj = typeof reason === 'string' ? JSON.parse(reason) : reason
-      // Handle prismarine-nbt compound: { type:'compound', value:{ text:{ value:'...' } } }
       if (obj?.type === 'compound' && obj?.value) {
         r = obj.value.text?.value || obj.value.translate?.value || JSON.stringify(obj.value)
       } else {
@@ -304,14 +304,25 @@ function createBot() {
     warn(`Kicked: ${r}`)
     scheduleReconnect()
   })
+
   bot.on('error', (e) => {
     if (e.code === 'ECONNREFUSED') warn('Connection refused — retrying...')
     else err(e.message)
   })
+
   bot.on('end', (reason) => {
     log(`Disconnected (${reason || 'unknown'})`)
     clearTimers()
-    scheduleReconnect()
+
+    // If we got a Transfer packet, connect directly to the target server
+    if (transferTarget) {
+      const { host: tHost, port: tPort } = transferTarget
+      transferTarget = null
+      log(`Connecting to transferred server ${tHost}:${tPort}...`)
+      setTimeout(() => createBot(tHost, tPort), 1500)
+    } else {
+      scheduleReconnect()
+    }
   })
 }
 
@@ -328,8 +339,9 @@ function startAntiAfk() {
 
 function scheduleReconnect() {
   clearTimers()
+  transferTarget = null
   log(`Reconnecting in ${config.reconnectDelay / 1000}s...`)
-  reconnectTimer = setTimeout(createBot, config.reconnectDelay)
+  reconnectTimer = setTimeout(() => createBot(), config.reconnectDelay)
 }
 
 function clearTimers() {
