@@ -1,0 +1,12 @@
+{
+  "name": "minefort-keepalive-bot",
+  "version": "1.0.0",
+  "description": "Keeps a Minefort server awake by maintaining a real player connection",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "mineflayer": "^4.23.0"
+  }
+}
