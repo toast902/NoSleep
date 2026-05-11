@@ -359,6 +359,31 @@ function createBot(host, port) {
 
     startAntiAfk()
 
+    // ── BungeeCord server switch (1.20.2+ configuration state) ─────────────
+    // When BungeeCord switches servers it sends start_configuration to enter
+    // a config exchange phase. Mineflayer doesn't handle this mid-session so
+    // we intercept the raw packets and respond manually to keep the connection alive.
+    bot._client.on('start_configuration', () => {
+      log('BungeeCord server switch detected — handling configuration...')
+      try {
+        bot._client.write('acknowledge_configuration', {})
+        loggedIn = false
+        mapGrids.clear()
+        mapSlotOrder.length = 0
+      } catch (e) {
+        warn(`Config ack failed: ${e.message}`)
+      }
+    })
+
+    bot._client.on('finish_configuration', () => {
+      log('Configuration complete — now on new server')
+      try {
+        bot._client.write('acknowledge_configuration', {})
+      } catch (e) {
+        warn(`Finish config ack failed: ${e.message}`)
+      }
+    })
+
     // Native Transfer packet handler
     bot._client.on('transfer', (packet) => {
       log(`Transfer packet → ${packet.host}:${packet.port}`)
