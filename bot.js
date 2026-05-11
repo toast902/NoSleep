@@ -311,18 +311,19 @@ function createBot(host, port) {
   })
 
   bot.on('end', (reason) => {
-    log(`Disconnected (${reason || 'unknown'})`)
-    clearTimers()
-
-    // If we got a Transfer packet, connect directly to the target server
-    if (transferTarget) {
+    // Ignore spurious end events if already reconnecting or transferring
+    if (reason === 'transfer') {
+      log(`Disconnected for transfer — connecting to ${transferTarget?.host}`)
+      clearTimers()
       const { host: tHost, port: tPort } = transferTarget
       transferTarget = null
-      log(`Connecting to transferred server ${tHost}:${tPort}...`)
-      setTimeout(() => createBot(tHost, tPort), 1500)
-    } else {
-      scheduleReconnect()
+      setTimeout(() => createBot(tHost, tPort), 2000)
+      return
     }
+
+    log(`Disconnected (${reason || 'unknown'})`)
+    clearTimers()
+    scheduleReconnect()
   })
 }
 

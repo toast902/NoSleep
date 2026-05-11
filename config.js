@@ -9,6 +9,6 @@ module.exports = {
   // AuthMe password you registered with
   botPassword: '12345678*',
 
-  reconnectDelay: 10000,
+  reconnectDelay: 60000,
   antiAfkInterval: 20000,
 }
