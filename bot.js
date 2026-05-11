@@ -228,7 +228,12 @@ function createBot() {
     startAntiAfk()
 
     bot._client.on('map', (packet) => {
-      const id = packet.mapId
+      // Field name varies by protocol version — try all known names
+      const id = packet.mapId ?? packet.id ?? packet.itemDamage
+      if (id === undefined || id === null) {
+        warn(`Unknown map packet fields: ${Object.keys(packet).join(', ')}`)
+        return
+      }
 
       // Assign a slot index to this map ID the first time we see it
       if (!mapGrids.has(id)) {
@@ -284,8 +289,15 @@ function createBot() {
   })
 
   bot.on('kicked', (reason) => {
-    let r = reason
-    try { const p = JSON.parse(reason); r = p.text || p.translate || reason } catch (_) {}
+    let r
+    try {
+      if (typeof reason === 'object' && reason !== null) {
+        r = reason.text || reason.translate || JSON.stringify(reason)
+      } else {
+        const p = JSON.parse(reason)
+        r = p.text || p.translate || JSON.stringify(p)
+      }
+    } catch (_) { r = String(reason) }
     warn(`Kicked: ${r}`)
     scheduleReconnect()
   })
