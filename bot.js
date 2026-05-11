@@ -282,8 +282,10 @@ function createBot() {
     }
     if (loggedIn && (lower.includes('successfully logged in') || lower.includes('you are now logged'))) {
       setTimeout(() => {
-        bot.chat('/server lunarsmps5')
-        log('Auto-sent /server transfer')
+        if (bot && bot.entity) {
+          bot.chat('/server lunarsmps5')
+          log('Auto-sent /server transfer')
+        }
       }, 1200)
     }
   })
@@ -291,11 +293,12 @@ function createBot() {
   bot.on('kicked', (reason) => {
     let r
     try {
-      if (typeof reason === 'object' && reason !== null) {
-        r = reason.text || reason.translate || JSON.stringify(reason)
+      const obj = typeof reason === 'string' ? JSON.parse(reason) : reason
+      // Handle prismarine-nbt compound: { type:'compound', value:{ text:{ value:'...' } } }
+      if (obj?.type === 'compound' && obj?.value) {
+        r = obj.value.text?.value || obj.value.translate?.value || JSON.stringify(obj.value)
       } else {
-        const p = JSON.parse(reason)
-        r = p.text || p.translate || JSON.stringify(p)
+        r = obj?.text || obj?.translate || JSON.stringify(obj)
       }
     } catch (_) { r = String(reason) }
     warn(`Kicked: ${r}`)
