@@ -359,6 +359,25 @@ function createBot(host, port) {
 
     startAntiAfk()
 
+    // Debug: log all packets during server switch
+    let switching = false
+    bot._client.on("packet", (data, meta) => {
+      if (switching) log(`[PKT] ${meta.name} (${meta.state ?? bot._client.state})`)
+    })
+    bot._client.on("start_configuration", () => {
+      log("start_configuration received")
+      switching = true
+      bot._client.write("acknowledge_configuration", {})
+      bot._client.state = "configuration"
+    })
+    bot._client.on("finish_configuration", () => {
+      log("finish_configuration received")
+      bot._client.write("acknowledge_configuration", {})
+      bot._client.state = "play"
+      switching = false
+      loggedIn = false
+    })
+
     // Native Transfer packet handler
     bot._client.on('transfer', (packet) => {
       log(`Transfer packet → ${packet.host}:${packet.port}`)
