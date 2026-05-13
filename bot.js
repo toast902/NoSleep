@@ -370,8 +370,23 @@ function createBot(host, port) {
       bot._client.write("acknowledge_configuration", {})
       bot._client.state = "configuration"
     })
+
+    // Must reply to keep_alive even in configuration state or the server kicks us
+    bot._client.on("keep_alive", (packet) => {
+      if (bot._client.state === "configuration") {
+        try { bot._client.write("keep_alive", { keepAliveId: packet.keepAliveId }) }
+        catch (e) { warn(`keep_alive reply failed: ${e.message}`) }
+      }
+    })
+
+    // Must reply to select_known_packs or configuration stalls
+    bot._client.on("select_known_packs", () => {
+      try { bot._client.write("known_packs", { knownPacks: [] }) }
+      catch (e) { warn(`known_packs reply failed: ${e.message}`) }
+    })
+
     bot._client.on("finish_configuration", () => {
-      log("finish_configuration received")
+      log("finish_configuration received — server switch complete!")
       bot._client.write("acknowledge_configuration", {})
       bot._client.state = "play"
       switching = false
