@@ -359,43 +359,6 @@ function createBot(host, port) {
 
     startAntiAfk()
 
-    // ── BungeeCord server switch (1.20.2+ configuration state) ─────────────
-    // Sequence during a BungeeCord server switch:
-    //   server → start_configuration
-    //   client → acknowledge_configuration  (we enter configuration state)
-    //   server → select_known_packs         (we reply with empty known_packs)
-    //   server → registry_data / tags       (we ignore, no reply needed)
-    //   server → finish_configuration
-    //   client → acknowledge_configuration  (we return to play state)
-    // Without handling this mineflayer drops the connection immediately.
-
-    bot._client.on('start_configuration', () => {
-      log('BungeeCord server switch — entering configuration state...')
-      try {
-        // Must write acknowledge while STILL in PLAY state, THEN switch
-        bot._client.write('acknowledge_configuration', {})
-        bot._client.state = 'configuration'
-        loggedIn = false
-        mapGrids.clear()
-        mapSlotOrder.length = 0
-      } catch (e) { warn(`start_configuration handler error: ${e.message}`) }
-    })
-
-    bot._client.on('select_known_packs', () => {
-      try {
-        // Reply with no known packs — server will send full data
-        bot._client.write('known_packs', { knownPacks: [] })
-      } catch (e) { warn(`select_known_packs handler error: ${e.message}`) }
-    })
-
-    bot._client.on('finish_configuration', () => {
-      log('Configuration done — returning to play state')
-      try {
-        bot._client.write('acknowledge_configuration', {})
-        bot._client.state = 'play'
-      } catch (e) { warn(`finish_configuration handler error: ${e.message}`) }
-    })
-
     // Native Transfer packet handler
     bot._client.on('transfer', (packet) => {
       log(`Transfer packet → ${packet.host}:${packet.port}`)
