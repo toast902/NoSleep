@@ -380,9 +380,15 @@ function createBot(host, port) {
     })
 
     // Must reply to select_known_packs or configuration stalls
-    bot._client.on("select_known_packs", () => {
-      try { bot._client.write("known_packs", { knownPacks: [] }) }
-      catch (e) { warn(`known_packs reply failed: ${e.message}`) }
+    bot._client.on("select_known_packs", (packet) => {
+      log(`select_known_packs received (${(packet.knownPacks||[]).length} packs from server)`)
+      // Try both possible packet names for the response
+      const sent = ['known_packs', 'select_known_packs'].find(name => {
+        try { bot._client.write(name, { knownPacks: [] }); return true }
+        catch (_) { return false }
+      })
+      if (sent) log(`replied to select_known_packs via '${sent}'`)
+      else warn('could not reply to select_known_packs — no valid packet name found')
     })
 
     bot._client.on("finish_configuration", () => {
